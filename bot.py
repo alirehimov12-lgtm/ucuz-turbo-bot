@@ -2,6 +2,7 @@ import os
 import re
 import statistics
 import requests
+from urllib.parse import quote
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 SERPER_API_KEY = os.environ["SERPER_API_KEY"]
@@ -11,8 +12,17 @@ CHANNEL = "@ucuz_turboaz"
 SERPER_URL = "https://google.serper.dev/search"
 TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
+MAX_PRICE = 30000
+MIN_DISCOUNT = 20
+SEARCH_RESULTS = 30
 
-def serper_search(query):
+session = requests.Session()
+session.headers.update({
+    "User-Agent": "Mozilla/5.0"
+})
+
+
+def search_google(query):
     headers = {
         "X-API-KEY": SERPER_API_KEY,
         "Content-Type": "application/json"
@@ -22,58 +32,49 @@ def serper_search(query):
         "q": query,
         "gl": "az",
         "hl": "az",
-        "num": 10
+        "num": SEARCH_RESULTS
     }
 
-    response = requests.post(
+    r = requests.post(
         SERPER_URL,
         headers=headers,
         json=data,
         timeout=30
     )
 
-    response.raise_for_status()
-    return response.json()
+    r.raise_for_status()
+    return r.json()
 
 
 def extract_price(text):
-    if not text:
-        return None
-
     patterns = [
-        r'([\d\s.,]+)\s*₼',
-        r'([\d\s.,]+)\s*AZN',
-        r'qiyməti\s*([\d\s.,]+)',
-        r'([\d\s.,]+)\s*manat'
+        r'(\d{1,3}(?:[ .]\d{3})+)\s*(?:AZN|₼|manat)',
+        r'(\d{4,6})\s*(?:AZN|₼|manat)'
     ]
 
     for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
+        m = re.search(pattern, text, re.IGNORECASE)
 
-        if match:
-            value = match.group(1)
-            value = value.replace(" ", "").replace(",", ".")
+        if m:
+            value = m.group(1)
+            value = value.replace(" ", "").replace(".", "")
 
             try:
-                number = float(value)
+                price = int(value)
 
-                # Dollar/euro nəticələrini mümkün qədər keçirik
-                if number > 0:
-                    return number
-            except:
+                if 500 <= price <= MAX_PRICE:
+                    return price
+            except ValueError:
                 pass
 
     return None
 
 
 def extract_year(text):
-    if not text:
-        return None
-
     years = re.findall(r'\b(19\d{2}|20\d{2})\b', text)
 
-    if years:
-        year = int(years[0])
+    for y in years:
+        year = int(y)
 
         if 1980 <= year <= 2026:
             return year
@@ -82,51 +83,89 @@ def extract_year(text):
 
 
 def extract_km(text):
-    if not text:
-        return None
-
     patterns = [
-        r'([\d\s.,]+)\s*km',
-        r'([\d\s.,]+)\s*KM'
+        r'([\d .]+)\s*km',
+        r'([\d .]+)\s*KM'
     ]
 
     for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
+        m = re.search(pattern, text, re.IGNORECASE)
 
-        if match:
-            value = match.group(1)
-            value = value.replace(" ", "").replace(".", "").replace(",", "")
+        if m:
+            value = m.group(1)
+            value = value.replace(" ", "").replace(".", "")
 
             try:
                 return int(value)
-            except:
+            except ValueError:
                 pass
 
     return None
 
 
+def is_active(url):
+    """
+    Turbo.az elan səhifəsinin hələ mövcud olub-olmadığını yoxlayır.
+    Səhifə silinibsə / artıq mövcud deyilsə False qaytarır.
+    """
+
+    try:
+        r = session.get(
+            url,
+            timeout=15,
+            allow_redirects=True
+        )
+
+        if r.status_code != 200:
+            return False
+
+        text = r.text.lower()
+
+        inactive_words = [
+            "elan tapılmadı",
+            "elan mövcud deyil",
+            "elan silinib",
+            "page not found",
+            "not found"
+        ]
+
+        for word in inactive_words:
+            if word in text:
+                return False
+
+        return "turbo.az" in r.url.lower()
+
+    except Exception as e:
+        print("Aktivlik yoxlaması:", e)
+        return False
+
+
 def get_cars(query):
-    data = serper_search(query)
+    data = search_google(query)
 
     cars = []
 
     for item in data.get("organic", []):
+
         title = item.get("title", "")
         snippet = item.get("snippet", "")
         link = item.get("link", "")
 
+        if "turbo.az/autos/" not in link:
+            continue
+
         text = f"{title} {snippet}"
 
-        # Yalnız Turbo.az nəticələri
-        if "turbo.az" not in link:
+        price = extract_price(text)
+
+        if not price:
             continue
 
-        price = extract_price(text)
+        if price > MAX_PRICE:
+            continue
+
         year = extract_year(text)
         km = extract_km(text)
-
-        if not price or not year:
-            continue
 
         cars.append({
             "title": title,
@@ -140,48 +179,17 @@ def get_cars(query):
     return cars
 
 
-def normalize_model(title):
-    """
-    Eyni marka/model üzrə sadə qruplaşdırma.
-    """
-    title = title.lower()
-
-    # Turbo.az başlıqlarında marka/model adını mümkün qədər saxlayırıq
-    title = re.sub(r'\s+', ' ', title)
-
-    return title
-
-
-def calculate_market_price(cars):
-    """
-    Tapılmış elanların qiymətlərindən bazar qiyməti çıxarır.
-    Çox ucuz və çox baha nəticələrin təsirini azaltmaq üçün
-    median istifadə olunur.
-    """
-
+def market_price(cars):
     prices = [
-        car["price"]
-        for car in cars
-        if car.get("price") and car["price"] > 500
+        c["price"]
+        for c in cars
+        if 500 <= c["price"] <= MAX_PRICE
     ]
 
     if len(prices) < 3:
         return None
 
     return statistics.median(prices)
-
-
-def bargain_score(car, market_price):
-    """
-    Qiymət bazar qiymətindən nə qədər aşağıdır.
-    """
-
-    if not market_price:
-        return 0
-
-    difference = (market_price - car["price"]) / market_price * 100
-
-    return round(difference, 1)
 
 
 def send_telegram(message):
@@ -191,34 +199,37 @@ def send_telegram(message):
         "disable_web_page_preview": False
     }
 
-    response = requests.post(
+    r = requests.post(
         TELEGRAM_URL,
         data=data,
         timeout=30
     )
 
-    response.raise_for_status()
+    r.raise_for_status()
 
 
 def main():
 
-    # Turbo.az üzrə aktual elan axtarışları
     queries = [
-        'site:turbo.az/autos Turbo.az avtomobil elanları 2026',
-        'site:turbo.az/autos Turbo.az BMW Mercedes Toyota Kia Hyundai',
-        'site:turbo.az/autos "₼" "km" "Bakı"'
+        'site:turbo.az/autos/ "AZN" "km"',
+        'site:turbo.az/autos/ "₼" "km"',
+        'site:turbo.az/autos/ "manat" "km"',
+        'site:turbo.az/autos/ 2026 avtomobil',
+        'site:turbo.az/autos/ 2025 avtomobil'
     ]
 
     all_cars = []
 
     for query in queries:
+
         try:
             cars = get_cars(query)
             all_cars.extend(cars)
-        except Exception as e:
-            print("Search error:", e)
 
-    # Eyni elanların təkrarını silirik
+        except Exception as e:
+            print("Google axtarış xətası:", e)
+
+    # Təkrar elanları sil
     unique = {}
 
     for car in all_cars:
@@ -226,67 +237,113 @@ def main():
 
     cars = list(unique.values())
 
+    print("Tapılan elan:", len(cars))
+
     if not cars:
         send_telegram(
-            "🔎 Turbo.az axtarışında hazırda uyğun elan tapılmadı."
+            "🔎 30 000 AZN-ə qədər uyğun Turbo.az elanı tapılmadı."
         )
         return
 
-    # Ümumi bazar qiyməti
-    market_price = calculate_market_price(cars)
-
-    # Ən ucuz elanları seçirik
-    scored = []
+    # Aktiv elanları yoxla
+    active_cars = []
 
     for car in cars:
-        score = bargain_score(car, market_price)
 
-        car["score"] = score
+        print("Yoxlanılır:", car["link"])
 
-        if score >= 15:
-            scored.append(car)
+        if is_active(car["link"]):
+            active_cars.append(car)
 
-    scored.sort(
-        key=lambda x: x["score"],
+    print("Aktiv elan:", len(active_cars))
+
+    if not active_cars:
+        send_telegram(
+            "🔎 Aktiv Turbo.az elanı tapılmadı."
+        )
+        return
+
+    # Bazar qiyməti
+    market = market_price(active_cars)
+
+    if not market:
+        send_telegram(
+            "📊 Aktiv elanlar tapıldı, amma "
+            "bazar qiymətini hesablamaq üçün kifayət qədər "
+            "oxşar qiymət yoxdur."
+        )
+        return
+
+    print("Bazar medianı:", market)
+
+    good_deals = []
+
+    for car in active_cars:
+
+        discount = (
+            (market - car["price"]) /
+            market
+        ) * 100
+
+        car["discount"] = round(discount, 1)
+
+        if discount >= MIN_DISCOUNT:
+            good_deals.append(car)
+
+    good_deals.sort(
+        key=lambda x: x["discount"],
         reverse=True
     )
 
-    # Maksimum 5 elan göndər
-    scored = scored[:5]
+    # Maksimum 10 ən yaxşı elan
+    good_deals = good_deals[:10]
 
-    if not scored:
+    if not good_deals:
+
         send_telegram(
-            "🔎 Turbo.az-da elanlar tapıldı, amma "
-            "bazar qiymətindən ən azı 15% ucuz görünən elan yoxdur."
+            f"🔎 30 000 AZN-ə qədər aktiv elanlar tapıldı.\n\n"
+            f"📊 Cari bazar medianı: {market:,.0f} AZN\n\n"
+            f"🔥 Amma bazardan ən azı {MIN_DISCOUNT}% "
+            f"ucuz elan tapılmadı."
         )
+
         return
 
-    for car in scored:
+    for car in good_deals:
 
-        price_text = f"{car['price']:,.0f} ₼".replace(",", " ")
+        price = f"{car['price']:,}".replace(",", " ")
+        market_text = f"{market:,.0f}".replace(",", " ")
 
         if car["km"]:
-            km_text = f"{car['km']:,} km".replace(",", " ")
+            km = f"{car['km']:,}".replace(",", " ") + " km"
         else:
-            km_text = "Yürüş məlum deyil"
+            km = "Məlum deyil"
+
+        year = car["year"] if car["year"] else "Məlum deyil"
+
+        if car["discount"] >= 30:
+            badge = "🔥🔥 ÇOX UCUZ"
+        else:
+            badge = "🔥 YAXŞI FÜRSƏT"
 
         message = (
-            "🚨 UCUZ ELAN TAPILDI\n\n"
-            f"🚗 {car['title']}\n"
-            f"💰 Qiymət: {price_text}\n"
-            f"📅 İl: {car['year']}\n"
-            f"🛣 Yürüş: {km_text}\n\n"
-            f"📊 Bazar qiymətindən təxminən: "
-            f"{car['score']}% aşağı\n\n"
+            f"{badge}\n\n"
+            f"🚗 {car['title']}\n\n"
+            f"💰 Elan qiyməti: {price} AZN\n"
+            f"📊 Təxmini bazar qiyməti: {market_text} AZN\n"
+            f"📉 Fərq: {car['discount']}%\n"
+            f"📅 İl: {year}\n"
+            f"🛣 Yürüş: {km}\n\n"
             f"🔗 {car['link']}\n\n"
-            "⚠️ Qiymətləndirmə yalnız elan məlumatlarına "
-            "əsaslanan ilkin analizdir."
+            f"✅ Elan aktiv olaraq yoxlanılıb.\n"
+            f"⚠️ Qiymətləndirmə ilkin avtomatik analizdir."
         )
 
         try:
             send_telegram(message)
+
         except Exception as e:
-            print("Telegram error:", e)
+            print("Telegram xətası:", e)
 
 
 if __name__ == "__main__":
