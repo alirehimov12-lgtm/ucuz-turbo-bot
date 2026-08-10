@@ -1,104 +1,54 @@
-import os
 import requests
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-SERPER_API_KEY = os.environ["SERPER_API_KEY"]
+URL = "https://turbo.az/autos"
 
-CHANNEL = "@ucuz_turboaz"
+headers = {
+    "User-Agent": "Mozilla/5.0"
+}
 
-def send_message(text):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-
-    requests.post(
-        url,
-        data={
-            "chat_id": CHANNEL,
-            "text": text
-        },
+try:
+    response = requests.get(
+        URL,
+        headers=headers,
         timeout=30
     )
 
+    print("STATUS:", response.status_code)
+    print("FINAL URL:", response.url)
+    print("LENGTH:", len(response.text))
 
-def main():
+    if response.status_code == 200:
+        print("TURBO.AZ-A GIRIS VAR")
+        
+        # Konkret elan linklərini tap
+        from bs4 import BeautifulSoup
 
-    url = "https://google.serper.dev/search"
-
-    headers = {
-        "X-API-KEY": SERPER_API_KEY,
-        "Content-Type": "application/json"
-    }
-
-    queries = [
-        "Turbo.az BMW 520",
-        "Turbo.az Mercedes",
-        "Turbo.az Toyota",
-        "Turbo.az Kia",
-        "Turbo.az Hyundai"
-    ]
-
-    all_results = []
-
-    for query in queries:
-
-        data = {
-            "q": query,
-            "gl": "az",
-            "hl": "az",
-            "num": 20
-        }
-
-        response = requests.post(
-            url,
-            headers=headers,
-            json=data,
-            timeout=30
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser"
         )
 
-        print(query, response.status_code)
+        links = []
 
-        if response.status_code != 200:
-            print(response.text)
-            continue
+        for a in soup.select("a.products-i__link"):
+            href = a.get("href")
 
-        result = response.json()
+            if href:
+                if href.startswith("/"):
+                    href = "https://turbo.az" + href
 
-        for item in result.get("organic", []):
+                links.append(href)
 
-            link = item.get("link", "")
+        # Təkrarları sil
+        links = list(dict.fromkeys(links))
 
-            if "turbo.az" in link.lower():
-                all_results.append(item)
+        print("ELAN LINKLERI:", len(links))
 
-    # Təkrarları sil
-    unique = {}
+        for link in links[:10]:
+            print(link)
 
-    for item in all_results:
-        unique[item.get("link")] = item
+    else:
+        print("TURBO.AZ GIRISI BLOKLADI")
 
-    results = list(unique.values())
-
-    print("Turbo.az nəticələri:", len(results))
-
-    if not results:
-        send_message(
-            "❌ Bu dəfə Serper-dən Turbo.az nəticəsi gəlmədi."
-        )
-        return
-
-    message = (
-        f"🔎 Turbo.az nəticələri: {len(results)}\n\n"
-    )
-
-    for i, item in enumerate(results[:10], 1):
-
-        message += (
-            f"{i}. {item.get('title', '')}\n"
-            f"{item.get('snippet', '')}\n"
-            f"{item.get('link', '')}\n\n"
-        )
-
-    send_message(message)
-
-
-if __name__ == "__main__":
-    main()
+except Exception as e:
+    print("XETA:", e)
