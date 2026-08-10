@@ -28,58 +28,73 @@ def main():
         "Content-Type": "application/json"
     }
 
-    data = {
-        "q": "site:turbo.az/autos",
-        "gl": "az",
-        "hl": "az",
-        "num": 30
-    }
+    queries = [
+        "Turbo.az BMW 520",
+        "Turbo.az Mercedes",
+        "Turbo.az Toyota",
+        "Turbo.az Kia",
+        "Turbo.az Hyundai"
+    ]
 
-    response = requests.post(
-        url,
-        headers=headers,
-        json=data,
-        timeout=30
-    )
+    all_results = []
 
-    print("SERPER STATUS:", response.status_code)
-    print("SERPER RESPONSE:")
-    print(response.text)
+    for query in queries:
 
-    if response.status_code != 200:
-        send_message(
-            "❌ Serper xətası:\n\n"
-            + response.text[:3000]
+        data = {
+            "q": query,
+            "gl": "az",
+            "hl": "az",
+            "num": 20
+        }
+
+        response = requests.post(
+            url,
+            headers=headers,
+            json=data,
+            timeout=30
         )
-        return
 
-    result = response.json()
+        print(query, response.status_code)
 
-    organic = result.get("organic", [])
+        if response.status_code != 200:
+            print(response.text)
+            continue
 
-    print("NƏTİCƏ SAYI:", len(organic))
+        result = response.json()
 
-    if not organic:
+        for item in result.get("organic", []):
+
+            link = item.get("link", "")
+
+            if "turbo.az" in link.lower():
+                all_results.append(item)
+
+    # Təkrarları sil
+    unique = {}
+
+    for item in all_results:
+        unique[item.get("link")] = item
+
+    results = list(unique.values())
+
+    print("Turbo.az nəticələri:", len(results))
+
+    if not results:
         send_message(
-            "❌ Serper Turbo.az-dan nəticə qaytarmadı."
+            "❌ Bu dəfə Serper-dən Turbo.az nəticəsi gəlmədi."
         )
         return
 
     message = (
-        f"🔎 Serper Turbo.az-dan "
-        f"{len(organic)} nəticə qaytardı.\n\n"
+        f"🔎 Turbo.az nəticələri: {len(results)}\n\n"
     )
 
-    for i, item in enumerate(organic[:10], 1):
-
-        title = item.get("title", "")
-        snippet = item.get("snippet", "")
-        link = item.get("link", "")
+    for i, item in enumerate(results[:10], 1):
 
         message += (
-            f"{i}. {title}\n"
-            f"{snippet}\n"
-            f"{link}\n\n"
+            f"{i}. {item.get('title', '')}\n"
+            f"{item.get('snippet', '')}\n"
+            f"{item.get('link', '')}\n\n"
         )
 
     send_message(message)
