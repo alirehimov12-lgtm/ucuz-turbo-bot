@@ -17,10 +17,7 @@ jobs:
           python-version: "3.x"
 
       - name: Install dependencies
-        run: pip install requests
+        run: pip install requests beautifulsoup4
 
       - name: Run bot
-        env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
         run: python bot.py
